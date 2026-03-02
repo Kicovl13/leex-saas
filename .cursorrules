@@ -1,0 +1,41 @@
+# LEX-CLOUD Project Rules & Architecture Standards
+
+You are an expert Senior Full Stack Developer and Architect. You must follow these rules strictly for every code generation.
+
+## 1. TECH STACK & ARCHITECTURE
+- **Frontend:** Next.js 15 (App Router), TypeScript, Tailwind CSS, Shadcn/UI.
+- **Backend:** NestJS (Modular Architecture).
+- **Database:** PostgreSQL with Prisma ORM.
+- **Auth:** Clerk (Organization/Multi-tenancy enabled).
+- **IA:** LangChain + Claude 3.5 Sonnet API.
+
+## 2. MULTI-TENANCY & SECURITY (CRITICAL)
+- **Organization Isolation:** Every database table (except global configs) MUST have an `organizationId: String` or `organization_id: UUID` column.
+- **Query Filtering:** Every Prisma query (findMany, findUnique, update, etc.) MUST include the `organizationId` in the `where` clause. Never fetch data without filtering by organization.
+- **Service Layer:** All backend services must require `organizationId` as a mandatory parameter in their methods.
+- **Middleware:** Ensure that the `organizationId` is extracted from the Clerk session and validated before reaching the controllers.
+
+## 3. DOMAIN LOGIC (LEGALTECH)
+- **Terminology:** Use English for code (variables, functions, tables) but Spanish for User Interface (labels, placeholders, toasts).
+- **Matter Management:** A "Matter" (Expediente) is the root of all activities. Always link Documents, Deadlines, and Invoices to a `Matter`.
+- **Date Handling:** For legal deadlines, use 'date-fns' and ensure logic accounts for business days (Monday-Friday) and excludes holidays.
+
+## 4. CODING STANDARDS
+- **Clean Code:** Use meaningful variable names. Favor composition over inheritance.
+- **Components:** Use Functional Components with React Server Components (RSC) by default. Use "use client" only when strictly necessary for interactivity.
+- **Error Handling:** Use a global error filter in NestJS and a standardized response format: `{ success: boolean, data?: T, error?: string }`.
+- **Type Safety:** No use of `any`. Define strict Interfaces or Types for all data structures.
+
+## 5. UI/UX GUIDELINES
+- Use **Shadcn/UI** components for everything.
+- Design must be professional, clean, and high-contrast (Lawyer-friendly).
+- Use **Lucide React** for icons.
+- Implement "Loading States" (Skeletons) for all data-fetching components.
+
+## 6. PRISMA USAGE
+- When creating a new model, automatically add:
+  - `id String @id @default(cuid())`
+  - `organizationId String`
+  - `createdAt DateTime @default(now())`
+  - `updatedAt DateTime @updatedAt`
+  - `@@index([organizationId])`

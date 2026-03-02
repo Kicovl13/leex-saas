@@ -1,0 +1,726 @@
+// LEX-CLOUD — SaaS Legal Multi-tenant
+// Aislamiento lógico: todas las consultas filtradas por organizationId
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+// En Prisma 7 la URL se configura en prisma.config.ts (datasource.url)
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum MatterStatus {
+  ACTIVE
+  ON_HOLD
+  CLOSED
+}
+
+enum MatterActivityType {
+  DOCUMENT_UPLOAD
+  STATUS_CHANGE
+  STAGE_CHANGE
+  NOTE
+  TIME_ENTRY
+  TASK_COMPLETED
+}
+
+enum DeadlineType {
+  HEARING // Vista / Audiencia
+  FILING // Presentación
+  RESPONSE // Respuesta
+  DISCOVERY // Descubrimiento
+  CONTRACT // Contrato / Vencimiento contractual
+  STATUTE // Prescripción / Caducidad
+  OTHER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  REVIEW
+  DONE
+}
+
+enum Plan {
+  FREE // Límite: 5 documentos/mes con IA
+  PRO // Límite: 100 documentos/mes con IA
+  ENTERPRISE // Sin límite
+}
+
+// =============================================================================
+// ORGANIZATION (Despacho) — Raíz del multi-tenancy
+// =============================================================================
+
+model Organization {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  clerkOrgId   String?  @unique @map("clerk_org_id") // Sync con Clerk
+  logoUrl      String?  @map("logo_url") // URL de S3 del logo
+  plan         Plan     @default(FREE)
+  primaryColor String   @default("#002147") @map("primary_color") // Color de marca
+  darkMode     Boolean  @default(false) @map("dark_mode")
+  fontFamily   String   @default("Inter") @map("font_family")
+  address      String?  @db.Text
+  phone        String?
+  website      String?
+  currency     String   @default("EUR") // EUR, USD, MXN, etc. para plantillas y montos
+  // Config: timezone, formato fecha, días hábiles para plazos
+  settings     Json?    @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  users                     User[]
+  clients                   Client[]
+  matters                   Matter[]
+  documents                 Document[]
+  documentVersions          DocumentVersion[]
+  documentTextIndexes       DocumentTextIndex[]
+  documentTags              DocumentTag[]
+  documentShareLinks        DocumentShareLink[]
+  documentSignatureRequests DocumentSignatureRequest[]
+  documentRetentionPolicies DocumentRetentionPolicy[]
+  deadlines                 Deadline[]
+  timeEntries               TimeEntry[]
+  tasks                     Task[]
+  holidays                  OrganizationHoliday[]
+  deadlineRules             DeadlineRule[]
+  activities                MatterActivity[]
+  auditLogs                 AuditLog[]
+  templates                 Template[]
+  workflowExecutions        WorkflowExecution[]
+  metricsSnapshots          OrganizationMetricsSnapshot[]
+  matterStageDefinitions    MatterStageDefinition[]
+  clientContacts            ClientContact[]
+  matterCommunications      MatterCommunication[]
+  activityTypes             OrganizationActivityType[]
+
+  @@map("organizations")
+}
+
+// =============================================================================
+// MATTER STAGE DEFINITION — Etapas configurables por tipo de materia
+// =============================================================================
+
+model MatterStageDefinition {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  matterType     String?  @map("matter_type") // null = etapas por defecto de la org
+  key            String // BORRADOR, NEGOCIACION, etc.
+  label          String
+  sortOrder      Int      @default(0) @map("sort_order")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, matterType, key])
+  @@index([organizationId])
+  @@index([organizationId, matterType])
+  @@map("matter_stage_definitions")
+}
+
+// =============================================================================
+// USER — Usuarios del despacho (vinculados a Clerk)
+// =============================================================================
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  clerkUserId    String   @map("clerk_user_id") // Sin @unique: el mismo Clerk user puede estar en varias orgs
+  email          String
+  name           String?
+  role           UserRole @default(MEMBER)
+  avatarUrl      String?  @map("avatar_url")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  timeEntries        TimeEntry[]
+  assignedTasks      Task[]       @relation("TaskAssignee")
+  responsibleMatters Matter[]     @relation("MatterResponsible")
+
+  @@unique([organizationId, clerkUserId])
+  @@index([organizationId])
+  @@index([clerkUserId])
+  @@map("users")
+}
+
+// =============================================================================
+// CLIENT — Clientes del despacho
+// =============================================================================
+
+model Client {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  name           String
+  email          String?
+  phone          String?
+  company        String?
+  address        String?
+  taxId          String?   @map("tax_id")
+  notes          String?   @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matters      Matter[]
+  contacts     ClientContact[]
+
+  @@index([organizationId])
+  @@index([organizationId, deletedAt])
+  @@map("clients")
+}
+
+// =============================================================================
+// CLIENT CONTACT — Contactos adicionales del cliente
+// =============================================================================
+
+model ClientContact {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  clientId       String   @map("client_id")
+  name           String
+  role           String? // Cargo / rol (ej. Director Legal)
+  email          String?
+  phone          String?
+  isPrimary      Boolean  @default(false) @map("is_primary")
+  notes          String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([clientId])
+  @@map("client_contacts")
+}
+
+// =============================================================================
+// MATTER (Expediente) — Centro de la aplicación
+// =============================================================================
+
+model Matter {
+  id                String       @id @default(cuid())
+  organizationId    String       @map("organization_id")
+  clientId          String       @map("client_id")
+  responsibleUserId String?      @map("responsible_user_id")
+  name              String
+  description       String?      @db.Text
+  status            MatterStatus @default(ACTIVE)
+  stage             String       @default("BORRADOR") // Clave de etapa (definida en MatterStageDefinition por matterType)
+  matterType        String?      @map("matter_type")
+  referenceCode     String?      @unique @map("reference_code")
+  publicToken       String?      @unique @map("public_token") // Portal del cliente (sin auth)
+  amount            Decimal?     @db.Decimal(12, 2) // Cuantía del juicio
+  hourlyRateCents   Int?         @map("hourly_rate_cents") // Tarifa por hora en centavos
+  courtName         String?      @map("court_name") // Nombre del juzgado
+  fileNumber        String?      @map("file_number") // Número de expediente judicial
+  budgetHours       Decimal?     @map("budget_hours") @db.Decimal(10, 2) // Presupuesto en horas (alertas si se supera)
+  customFields      Json?        @map("custom_fields") // Campos específicos por matterType (ej. CORPORATE: meetingDate, parties; CONTRACTS: parties, effectiveDate)
+  openedAt          DateTime?    @map("opened_at")
+  closedAt          DateTime?    @map("closed_at")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+  deletedAt         DateTime?    @map("deleted_at")
+
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client         Client                @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  responsible    User?                 @relation("MatterResponsible", fields: [responsibleUserId], references: [id], onDelete: SetNull)
+  documents      Document[]
+  deadlines      Deadline[]
+  timeEntries    TimeEntry[]
+  tasks          Task[]
+  activities     MatterActivity[]
+  communications MatterCommunication[]
+
+  @@index([organizationId])
+  @@index([clientId])
+  @@index([organizationId, status])
+  @@index([organizationId, deletedAt])
+  @@index([publicToken])
+  @@map("matters")
+}
+
+// =============================================================================
+// MATTER COMMUNICATION — Historial de comunicaciones (email, llamada, reunión)
+// =============================================================================
+
+model MatterCommunication {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  matterId       String   @map("matter_id")
+  type           String // email | call | meeting
+  subject        String?
+  occurredAt     DateTime @map("occurred_at")
+  notes          String?  @db.Text
+  userId         String?  @map("user_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter       Matter       @relation(fields: [matterId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([organizationId, matterId])
+  @@map("matter_communications")
+}
+
+// =============================================================================
+// DOCUMENT — Documentos del expediente (almacenamiento S3)
+// =============================================================================
+
+model Document {
+  id                   String    @id @default(cuid())
+  organizationId       String    @map("organization_id")
+  matterId             String    @map("matter_id")
+  folder               String? // Pruebas | Escritos | Sentencias
+  name                 String
+  s3Key                String    @map("s3_key")
+  mimeType             String    @map("mime_type")
+  sizeBytes            Int       @map("size_bytes")
+  uploadedById         String?   @map("uploaded_by_id")
+  fileHash             String?   @map("file_hash")
+  isPinned             Boolean   @default(false) @map("is_pinned")
+  restrictedToUserId   String?   @map("restricted_to_user_id")
+  deletedById          String?   @map("deleted_by_id")
+  classification       String?
+  confidentialityLevel String    @default("internal") @map("confidentiality_level")
+  allowedRoles         Json?     @map("allowed_roles")
+  aiSummary            String?   @map("ai_summary") @db.Text
+  aiMetadata           Json?     @map("ai_metadata")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  deletedAt            DateTime? @map("deleted_at")
+
+  organization      Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter            Matter                     @relation(fields: [matterId], references: [id], onDelete: Cascade)
+  versions          DocumentVersion[]
+  textIndex         DocumentTextIndex?
+  tags              DocumentTag[]
+  shareLinks        DocumentShareLink[]
+  signatureRequests DocumentSignatureRequest[]
+  workflows         WorkflowExecution[]
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([organizationId, isPinned])
+  @@index([organizationId, fileHash])
+  @@index([organizationId, deletedAt])
+  @@map("documents")
+}
+
+// =============================================================================
+// DOCUMENT VERSION — Historial inmutable de versiones de documento
+// =============================================================================
+
+model DocumentVersion {
+  id                String    @id @default(cuid())
+  organizationId    String    @map("organization_id")
+  documentId        String    @map("document_id")
+  version           Int
+  fileUrl           String    @map("file_url") // S3 key o URL del archivo versionado
+  status            String    @default("approved")
+  extractedText     String?   @map("extracted_text") @db.Text
+  reviewRequestedAt DateTime? @map("review_requested_at")
+  reviewRequestedBy String?   @map("review_requested_by")
+  approvedAt        DateTime? @map("approved_at")
+  approvedBy        String?   @map("approved_by")
+  rejectedAt        DateTime? @map("rejected_at")
+  rejectedBy        String?   @map("rejected_by")
+  rejectionReason   String?   @map("rejection_reason") @db.Text
+  createdBy         String?   @map("created_by")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, version])
+  @@index([organizationId])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+model DocumentTextIndex {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  documentId     String   @unique @map("document_id")
+  extractedText  String   @map("extracted_text") @db.Text
+  language       String?  @default("es")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("document_text_indexes")
+}
+
+model DocumentTag {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  documentId     String   @map("document_id")
+  label          String
+  source         String   @default("manual")
+  score          Float?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, label])
+  @@index([organizationId])
+  @@index([organizationId, label])
+  @@map("document_tags")
+}
+
+model DocumentShareLink {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  documentId     String    @map("document_id")
+  token          String    @unique
+  expiresAt      DateTime? @map("expires_at")
+  maxUses        Int?      @map("max_uses")
+  usedCount      Int       @default(0) @map("used_count")
+  revokedAt      DateTime? @map("revoked_at")
+  watermarkText  String?   @map("watermark_text")
+  createdBy      String?   @map("created_by")
+  lastAccessIp   String?   @map("last_access_ip")
+  lastAccessAt   DateTime? @map("last_access_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([documentId])
+  @@index([organizationId, revokedAt])
+  @@map("document_share_links")
+}
+
+model DocumentSignatureRequest {
+  id                String    @id @default(cuid())
+  organizationId    String    @map("organization_id")
+  documentId        String    @map("document_id")
+  provider          String    @default("manual")
+  status            String    @default("pending")
+  externalRequestId String?   @map("external_request_id")
+  signers           Json?     @default("[]")
+  evidenceUrl       String?   @map("evidence_url")
+  requestedBy       String?   @map("requested_by")
+  requestedAt       DateTime  @default(now()) @map("requested_at")
+  signedAt          DateTime? @map("signed_at")
+  cancelledAt       DateTime? @map("cancelled_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([documentId])
+  @@index([organizationId, status])
+  @@map("document_signature_requests")
+}
+
+model DocumentRetentionPolicy {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  documentType   String   @map("document_type")
+  retentionDays  Int      @map("retention_days")
+  autoHardDelete Boolean  @default(false) @map("auto_hard_delete")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, documentType])
+  @@index([organizationId])
+  @@map("document_retention_policies")
+}
+
+// =============================================================================
+// WORKFLOW EXECUTION — Estado de ejecuciones asíncronas (n8n / workers)
+// =============================================================================
+
+model WorkflowExecution {
+  id                  String    @id @default(cuid())
+  organizationId      String    @map("organization_id")
+  workflowType        String    @map("workflow_type") // DOCUMENT_AI, BI_NIGHTLY, etc.
+  entityType          String?   @map("entity_type") // Document, Matter, etc.
+  entityId            String?   @map("entity_id")
+  documentId          String?   @map("document_id")
+  status              String // queued | processing | completed | failed
+  attemptCount        Int       @default(0) @map("attempt_count")
+  errorMessage        String?   @map("error_message")
+  payload             Json? // último payload enviado/recibido
+  externalExecutionId String?   @unique @map("external_execution_id")
+  startedAt           DateTime? @map("started_at")
+  finishedAt          DateTime? @map("finished_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document     Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([workflowType, status])
+  @@index([entityType, entityId])
+  @@index([documentId])
+  @@map("workflow_executions")
+}
+
+// =============================================================================
+// ORGANIZATION METRICS SNAPSHOT — BI legal precalculado por organización
+// =============================================================================
+
+model OrganizationMetricsSnapshot {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  snapshotDate   DateTime @map("snapshot_date") @db.Date
+  metrics        Json
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, snapshotDate])
+  @@index([organizationId, snapshotDate])
+  @@map("organization_metrics_snapshots")
+}
+
+// =============================================================================
+// MATTER ACTIVITY — Bitácora / historial del expediente
+// =============================================================================
+
+model MatterActivity {
+  id             String             @id @default(cuid())
+  organizationId String             @map("organization_id")
+  matterId       String             @map("matter_id")
+  type           MatterActivityType @map("type")
+  content        String             @db.Text
+  metadata       Json? // payload adicional (doc name, old/new status, etc.)
+  userId         String?            @map("user_id")
+  isPublic       Boolean            @default(false) @map("is_public")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter       Matter       @relation(fields: [matterId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([matterId, createdAt])
+  @@map("matter_activities")
+}
+
+// =============================================================================
+// AUDIT LOG — Trazabilidad UPDATE/DELETE en Document y Matter
+// =============================================================================
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  userId         String?  @map("user_id")
+  entityType     String   @map("entity_type") // "Document" | "Matter"
+  entityId       String   @map("entity_id")
+  action         String // "UPDATE" | "DELETE"
+  oldData        Json?    @map("old_data")
+  newData        Json?    @map("new_data")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// =============================================================================
+// TEMPLATE — Plantillas Word (.docx) para generación de documentos
+// =============================================================================
+
+model Template {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  name           String
+  description    String?   @db.Text
+  fileUrl        String    @map("file_url") // S3 key del .docx
+  matterType     String?   @map("matter_type") // Opcional: filtrar por tipo de expediente
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, deletedAt])
+  @@index([organizationId, matterType])
+  @@map("templates")
+}
+
+// =============================================================================
+// DEADLINE (Plazo / Agenda) — Vencimientos (excl. fines de semana y festivos)
+// =============================================================================
+
+model Deadline {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  matterId       String       @map("matter_id")
+  title          String
+  dueDate        DateTime     @map("due_date")
+  deadlineType   DeadlineType @default(OTHER) @map("deadline_type")
+  notes          String?      @db.Text
+  completedAt    DateTime?    @map("completed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  deletedAt      DateTime?    @map("deleted_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter       Matter       @relation(fields: [matterId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([organizationId, dueDate])
+  @@index([organizationId, deletedAt])
+  @@map("deadlines")
+}
+
+// =============================================================================
+// DEADLINE RULE — Reglas de cálculo por tribunal/jurisdicción
+// =============================================================================
+
+model DeadlineRule {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  jurisdiction   String? // Ej: MX-CDMX
+  courtType      String   @map("court_type")
+  legalBasis     String   @map("legal_basis")
+  defaultDays    Int      @map("default_days")
+  isBusinessDays Boolean  @default(true) @map("is_business_days")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, courtType])
+  @@index([organizationId, legalBasis])
+  @@index([organizationId, jurisdiction])
+  @@map("deadline_rules")
+}
+
+// =============================================================================
+// TIME ENTRY — Horas facturables
+// =============================================================================
+
+model TimeEntry {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  matterId       String    @map("matter_id")
+  userId         String    @map("user_id")
+  description    String    @db.Text
+  minutes        Int
+  billable       Boolean   @default(true)
+  rateCents      Int?      @map("rate_cents") // Tarifa en centavos
+  activityType   String?   @map("activity_type") // litigio | asesoria | reunion | documentacion | otro
+  date           DateTime  @db.Date
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter       Matter       @relation(fields: [matterId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([organizationId, date])
+  @@index([organizationId, deletedAt])
+  @@map("time_entries")
+}
+
+// =============================================================================
+// TASK — Tareas del expediente o recordatorios globales (matterId opcional)
+// =============================================================================
+
+model Task {
+  id             String     @id @default(cuid())
+  organizationId String     @map("organization_id")
+  matterId       String?    @map("matter_id") // null = recordatorio / tarea global
+  assignedToId   String?    @map("assigned_to_id")
+  title          String
+  description    String?    @db.Text
+  status         TaskStatus @default(TODO)
+  dueDate        DateTime?  @map("due_date")
+  completedAt    DateTime?  @map("completed_at")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+  deletedAt      DateTime?  @map("deleted_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  matter       Matter?      @relation(fields: [matterId], references: [id], onDelete: SetNull)
+  assignedTo   User?        @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([matterId])
+  @@index([assignedToId])
+  @@index([organizationId, deletedAt])
+  @@index([organizationId, matterId])
+  @@map("tasks")
+}
+
+// =============================================================================
+// ORGANIZATION ACTIVITY TYPE — Tipos de actividad configurables (time entries)
+// =============================================================================
+
+model OrganizationActivityType {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  key            String // litigio, asesoria, reunion, etc.
+  label          String
+  sortOrder      Int      @default(0) @map("sort_order")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@map("organization_activity_types")
+}
+
+// =============================================================================
+// ORGANIZATION HOLIDAY — Días festivos por organización (para cálculo de plazos)
+// =============================================================================
+
+model OrganizationHoliday {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  date           DateTime @db.Date
+  name           String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, date])
+  @@index([organizationId])
+  @@map("organization_holidays")
+}

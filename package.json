@@ -1,0 +1,16 @@
+{
+  "name": "lex-saas",
+  "private": true,
+  "scripts": {
+    "dev:api": "pnpm --filter api run start:dev",
+    "dev:web": "pnpm --filter web run dev",
+    "dev:legal-ai": "pnpm --filter legal-ai-service run dev",
+    "build": "pnpm --filter * build"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "ioredis": "^5.9.3"
+  }
+}
